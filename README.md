@@ -4,7 +4,7 @@ Adds the **Steam Deck SteamOS recovery/repair image** to an existing
 [MActoy](https://github.com/cashcon57/mactoy)-created Ventoy USB — **from macOS** —
 and **fixes the boot-chain bug** that made the original Linux add-on hang.
 
-This is a macOS fork of [PizzaGntlemn's `Ventoy_SteamOS-Repair_Addon`](https://github.com/)
+This is a macOS fork of [PizzaG's Ventoy_SteamOS-Repair_Addon](https://github.com/PizzaG/Ventoy_SteamOS-Repair_Addon)
 (Linux). It does the same job (clone the 5 SteamOS partitions onto the Ventoy USB
 and add a custom GRUB entry) but:
 
@@ -79,7 +79,7 @@ p2  VTOYEFI    Ventoy EFI   <- untouched
 
 ## Credits
 
-- Original Linux add-on: **PizzaGntlemn** (A-Team Digital Solutions)
+- Original Linux add-on: **PizzaG** — <https://github.com/PizzaG/Ventoy_SteamOS-Repair_Addon>
 - Ventoy: **longpanda** — <https://www.ventoy.net>
 - MActoy: **cashcon57** — <https://github.com/cashcon57/mactoy>
 

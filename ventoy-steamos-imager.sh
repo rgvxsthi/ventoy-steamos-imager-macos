@@ -20,7 +20,7 @@
 #
 #  Requires: macOS, Homebrew + gptfdisk (sgdisk). Run with sudo.
 #
-#  Fork of PizzaGntlemn's Ventoy_SteamOS-Repair_Addon (Linux).
+#  Fork of PizzaG's Ventoy_SteamOS-Repair_Addon (Linux).
 #  MIT licensed - see LICENSE. Ventoy (c) longpanda. MActoy (c) cashcon57.
 # ============================================================================
 
