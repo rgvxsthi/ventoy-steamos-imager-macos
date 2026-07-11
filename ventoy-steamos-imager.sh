@@ -20,7 +20,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-APP_VERSION="1.1.0"
+APP_VERSION="1.1.1"
 TITLE="Ventoy SteamOS Imager"
 RESERVE_GIB=10
 VENTOY_REF_VERSION="1.1.16"
@@ -118,7 +118,8 @@ pick_image() {
 _ext_disks() {  # emits: /dev/diskN|label
     local d nm sz vt
     for d in $(diskutil list | grep -oE '^/dev/disk[0-9]+'); do
-        [[ "$(diskutil info "$d" 2>/dev/null | awk -F: '/Internal/{gsub(/ /,"",$2);print $2;exit}')" == "No" ]] || continue
+        [[ "$(diskutil info "$d" 2>/dev/null | awk -F: '/Device Location/{gsub(/ /,"",$2);print $2;exit}')" == "External" ]] || continue
+        diskutil info "$d" 2>/dev/null | grep -q 'Virtual: *No' || continue
         nm="$(diskutil info "$d" | awk -F: '/Device \/ Media Name/{sub(/^ */,"",$2);print $2;exit}')"
         sz="$(diskutil info "$d" | awk -F: '/Disk Size/{sub(/^ */,"",$2);print $2;exit}' | awk '{print $1" "$2}')"
         if diskutil list "$d" | grep -q VTOYEFI; then vt=" [Ventoy]"; else vt=""; fi
@@ -177,7 +178,7 @@ pick_image
 pick_disk
 
 # safety
-[[ "$(diskutil info "$DISK" | awk -F: '/Internal/{gsub(/ /,"",$2);print $2;exit}')" == "No" ]] \
+[[ "$(diskutil info "$DISK" | awk -F: '/Device Location/{gsub(/ /,"",$2);print $2;exit}')" == "External" ]] \
     || die "$DISK is INTERNAL. Refusing."
 diskutil list "$DISK" | grep -q VTOYEFI || {
     ui_confirm "$DISK has no VTOYEFI partition - it may not be a Ventoy USB.\nContinue anyway?" || die "Not a Ventoy USB."

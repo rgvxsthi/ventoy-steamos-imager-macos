@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.1
+- Fix "No external USB disks found": macOS whole-disk info has no `Internal`
+  field; detect via `Device Location: External` + `Virtual: No` (excludes
+  disk images / simulators).
+
 ## v1.1.0
 - Interactive macOS UI: double-clickable `.command`, native dialogs (osascript)
   for choosing the repair image and USB and for confirmations; disk progress
