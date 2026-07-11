@@ -20,7 +20,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-APP_VERSION="1.1.1"
+APP_VERSION="1.2.0"
 TITLE="Ventoy SteamOS Imager"
 RESERVE_GIB=10
 VENTOY_REF_VERSION="1.1.16"
@@ -281,13 +281,16 @@ cp "$ASSETS/ventoy_grub.cfg" "$MP/ventoy/ventoy_grub.cfg"
 cp "$ASSETS/ventoy.json"     "$MP/ventoy/ventoy.json"
 cp -R "$ASSETS/themes/A-Team" "$MP/ventoy/themes/A-Team"
 sync
-diskutil unmount "${DISK}s1" >/dev/null 2>&1 || true
+# leave the Ventoy data partition MOUNTED so more ISOs can be added
+diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
+MP="$(diskutil info "${DISK}s1" | awk -F: '/Mount Point/{sub(/^ */,"",$2);print $2; exit}')"
 
 say "=========================================================="
 say " SUCCESS - SteamOS added to your Ventoy USB"
 say "=========================================================="
-ui_info "Done!\n\nBoot the USB, press F6, and choose 'SteamOS Repair / Install'.\n\nYou can eject $DISK now."
-ok "Eject:  diskutil eject $DISK"
+ui_info "Done!\n\nBoot the USB, press F6, and choose 'SteamOS Repair / Install'.\n\nThe Ventoy drive is still mounted at:\n${MP:-/Volumes/Ventoy}\n\nDrag more ISOs there anytime, then eject from Finder when done."
+ok "Ventoy drive mounted at: ${MP:-/Volumes/Ventoy}  (add ISOs here)"
+ok "Eject when finished:  diskutil eject $DISK"
 echo
 read -r -p "Press ENTER to exit " _ 2>/dev/null || true
 exit 0

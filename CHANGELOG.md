@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.0
+- Leave the Ventoy data partition mounted at the end (was ejected) so more
+  ISOs can be added right away; success message points to the mount path.
+
 ## v1.1.1
 - Fix "No external USB disks found": macOS whole-disk info has no `Internal`
   field; detect via `Device Location: External` + `Virtual: No` (excludes
