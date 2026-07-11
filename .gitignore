@@ -1,0 +1,5 @@
+# never commit multi-GB disk images
+*.img
+*.img.bz2
+*.img.xz
+.DS_Store
