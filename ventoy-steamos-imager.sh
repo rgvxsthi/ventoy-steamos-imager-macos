@@ -3,244 +3,273 @@
 # ============================================================================
 #  Ventoy SteamOS Imager for macOS
 # ============================================================================
-#  Adds the Steam Deck SteamOS recovery/repair image to an EXISTING
-#  MActoy-created Ventoy USB, from macOS.
+#  Interactive macOS tool: adds the Steam Deck SteamOS recovery/repair image
+#  to an EXISTING Ventoy USB (e.g. made with MActoy), with the boot-chain fix
+#  the original Linux add-on lacks - SteamOS partitions are cloned with their
+#  ORIGINAL PARTUUIDs and type GUIDs preserved, so SteamOS's grub/steamenv can
+#  locate rootfs/var/efi and the image actually boots instead of hanging.
 #
-#  Includes the boot-chain fix missing from the original Linux add-on:
-#  the SteamOS partitions are cloned with their ORIGINAL PARTUUIDs and
-#  type GUIDs preserved, so SteamOS's grub/steamenv can locate rootfs,
-#  var and efi at boot. Without this, the menu chainloads and then hangs
-#  after the countdown (the widely reported bug).
+#  Uses native macOS dialogs (osascript) for picking the image + USB and for
+#  confirmations. Disk work runs with sudo; progress prints in Terminal.
 #
-#  macOS cannot shrink exFAT in place, so this script frees room by
-#  recreating the Ventoy data partition smaller (SAME start sector,
-#  SAME PARTUUID/type, re-formatted exFAT). Ventoy's boot code lives in
-#  VTOYEFI + reserved sectors and is left untouched. The SteamOS
-#  partitions are placed in the freed gap before VTOYEFI.
-#
-#  Requires: macOS, Homebrew + gptfdisk (sgdisk). Run with sudo.
-#
-#  Fork of PizzaG's Ventoy_SteamOS-Repair_Addon (Linux).
-#  MIT licensed - see LICENSE. Ventoy (c) longpanda. MActoy (c) cashcon57.
+#  Requires: macOS, Homebrew + gptfdisk (sgdisk).
+#  Fork of PizzaG's Ventoy_SteamOS-Repair_Addon (Linux). MIT - see LICENSE.
+#  Ventoy (c) longpanda.  MActoy (c) cashcon57.
 # ============================================================================
 
-set -euo pipefail
+set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-APP_VERSION="1.0.0"
-RESERVE_GIB=10                 # space carved from data partition for SteamOS
-VENTOY_REF_VERSION="1.1.16"    # latest Ventoy Linux verified at release time
+APP_VERSION="1.1.0"
+TITLE="Ventoy SteamOS Imager"
+RESERVE_GIB=10
+VENTOY_REF_VERSION="1.1.16"
 
-# absolute path to this script + its assets, resolved before any sudo re-exec
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 SELF_DIR="$(dirname "$SCRIPT")"
 ASSETS="$SELF_DIR/assets"
 
-# -------------------------------- output ------------------------------------
+# ------------------------------ output --------------------------------------
 say() { printf '\n%s\n' "$*"; }
 ok()  { printf '  --> %s\n' "$*"; }
 warn(){ printf '\n!! %s\n' "$*"; }
-die() { printf '\n** ERROR ** --> %s\n' "$*" >&2; echo; read -r -p "Press ENTER to exit "; exit 1; }
 
-# ---------------------------- root / sudo -----------------------------------
-if [[ "$(id -u)" -ne 0 ]]; then
-    say "This needs root for disk access. Re-running with sudo..."
-    exec sudo -E bash "$SCRIPT" "$@"
-fi
+# ------------------------------ GUI layer -----------------------------------
+GUI=0
+[[ "${VSI_NOGUI:-0}" != "1" ]] && osascript -e 'return' >/dev/null 2>&1 && GUI=1
 
-# ------------------------------- helpers ------------------------------------
+_esc() { printf '%s' "${1//\"/\\\"}"; }
+
+ui_info() {
+    if (( GUI )); then
+        osascript -e "display dialog \"$(_esc "$1")\" buttons {\"OK\"} default button 1 with title \"$TITLE\" with icon note" >/dev/null 2>&1
+    else say "$1"; fi
+}
+ui_error() {
+    if (( GUI )); then
+        osascript -e "display dialog \"$(_esc "$1")\" buttons {\"OK\"} default button 1 with title \"$TITLE\" with icon stop" >/dev/null 2>&1
+    fi
+    printf '\n** ERROR ** --> %s\n' "$1" >&2
+}
+die() { ui_error "$1"; echo; read -r -p "Press ENTER to exit " _ 2>/dev/null || true; exit 1; }
+
+ui_confirm() {  # $1 message ; 0 = proceed
+    if (( GUI )); then
+        osascript -e "button returned of (display dialog \"$(_esc "$1")\" buttons {\"Cancel\",\"Continue\"} default button \"Continue\" cancel button \"Cancel\" with title \"$TITLE\")" >/dev/null 2>&1
+    else
+        read -r -p "$1 [y/N]: " a; [[ "$a" =~ ^[Yy]$ ]]
+    fi
+}
+ui_danger() {  # scary erase confirm ; 0 = proceed
+    if (( GUI )); then
+        osascript -e "button returned of (display dialog \"$(_esc "$1")\" buttons {\"Cancel\",\"Erase & Install\"} default button \"Cancel\" cancel button \"Cancel\" with title \"$TITLE\" with icon caution)" >/dev/null 2>&1
+    else
+        local a; read -r -p "Type WIPE to erase and proceed: " a; [[ "$a" == "WIPE" ]]
+    fi
+}
+
+# --------------------------- dependencies -----------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
-
 ensure_sgdisk() {
     have sgdisk && return
-    say "sgdisk (gptfdisk) is required but not installed."
-    if have brew; then
-        read -r -p "Install it now (brew install gptfdisk)? [Y/n]: " a; a=${a:-Y}
-        [[ "$a" =~ ^[Yy]$ ]] || die "sgdisk required. Run: brew install gptfdisk"
-        sudo -u "${SUDO_USER:-$USER}" brew install gptfdisk || die "brew install failed"
-    else
-        die "Homebrew not found. Install from https://brew.sh then: brew install gptfdisk"
+    if (( GUI )); then
+        ui_confirm "sgdisk (gptfdisk) is required and not installed. Install it now with Homebrew?" || die "sgdisk required. Run: brew install gptfdisk"
     fi
-    have sgdisk || die "sgdisk still missing after install (check PATH)"
+    have brew || die "Homebrew not found. Install from https://brew.sh then: brew install gptfdisk"
+    say "Installing gptfdisk via Homebrew..."
+    brew install gptfdisk || die "brew install gptfdisk failed"
+    have sgdisk || die "sgdisk still not found after install"
 }
 
 check_ventoy_latest() {
-    say "Checking latest Ventoy version..."
     local latest
     latest="$(curl -sL --max-time 12 'https://sourceforge.net/projects/ventoy/rss?path=/' 2>/dev/null \
         | grep -oE 'ventoy-[0-9]+\.[0-9]+\.[0-9]+-linux\.tar\.gz' \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)"
-    if [[ -n "$latest" ]]; then
-        ok "Latest Ventoy release online: $latest  (add-on verified against $VENTOY_REF_VERSION)"
-    else
-        ok "Could not reach SourceForge; skipping version check."
-    fi
-    ok "MActoy installs/updates Ventoy itself - this add-on only adds SteamOS."
+    [[ -n "$latest" ]] && ok "Latest Ventoy online: $latest (verified against $VENTOY_REF_VERSION)"
+    ok "MActoy installs/updates Ventoy itself - this tool only adds SteamOS."
 }
 
-# sgdisk field readers (operate on a whole-disk device or image file)
-p_type() { sgdisk -i "$2" "$1" | awk -F': ' '/Partition GUID code/{print $2}' | awk '{print $1}'; }
-p_uuid() { sgdisk -i "$2" "$1" | awk -F': ' '/Partition unique GUID/{print $2}'; }
-p_size() { sgdisk -i "$2" "$1" | awk -F': ' '/Partition size/{print $2}' | awk '{print $1}'; }
-p_name() { sgdisk -i "$2" "$1" | sed -n "s/^Partition name: '\(.*\)'/\1/p"; }
-p_first(){ sgdisk -i "$2" "$1" | awk -F': ' '/First sector/{print $2}' | awk '{print $1}'; }
+# sgdisk field readers (need root)
+p_type() { sudo sgdisk -i "$2" "$1" | awk -F': ' '/Partition GUID code/{print $2}' | awk '{print $1}'; }
+p_uuid() { sudo sgdisk -i "$2" "$1" | awk -F': ' '/Partition unique GUID/{print $2}'; }
+p_size() { sudo sgdisk -i "$2" "$1" | awk -F': ' '/Partition size/{print $2}' | awk '{print $1}'; }
+p_name() { sudo sgdisk -i "$2" "$1" | sed -n "s/^Partition name: '\(.*\)'/\1/p"; }
+p_first(){ sudo sgdisk -i "$2" "$1" | awk -F': ' '/First sector/{print $2}' | awk '{print $1}'; }
 
-# ---------------------------- find repair image -----------------------------
-find_repair_image() {
+# --------------------------- pick repair image ------------------------------
+pick_image() {
+    local f
+    if (( GUI )); then
+        f="$(osascript -e 'POSIX path of (choose file with prompt "Select the SteamOS repair .img" of type {"img","public.data"})' 2>/dev/null)"
+        [[ -n "$f" && -f "$f" ]] && { IMG="$f"; return; }
+    fi
+    # fallback: auto-find *repair*.img nearby
     shopt -s nullglob
-    local c imgs=()
+    local imgs=() c
     for c in "$PWD"/*repair*.img "$SELF_DIR"/*repair*.img; do imgs+=("$c"); done
     shopt -u nullglob
-    [[ ${#imgs[@]} -eq 0 ]] && die "No SteamOS repair image (*repair*.img) found in $PWD or $SELF_DIR"
-    local seen="" u=()
-    for c in "${imgs[@]}"; do [[ "$seen" == *"|$c|"* ]] || { u+=("$c"); seen+="|$c|"; }; done
-    for c in "${u[@]}"; do
-        say "Found repair image:"; ok "$c"
-        read -r -p "Use this image? [Y/n]: " a; a=${a:-Y}
-        [[ "$a" =~ ^[Yy]$ ]] && { IMG="$c"; return; }
-    done
-    die "No repair image selected."
+    [[ ${#imgs[@]} -gt 0 ]] || die "No SteamOS repair image selected or found."
+    IMG="${imgs[0]}"
+    ui_confirm "Use this repair image?\n\n$IMG" || die "No repair image selected."
 }
 
-# ---------------------------- detect ventoy usb -----------------------------
-detect_usb() {
-    local d internal
+# ------------------------- external disk listing ----------------------------
+_ext_disks() {  # emits: /dev/diskN|label
+    local d nm sz vt
     for d in $(diskutil list | grep -oE '^/dev/disk[0-9]+'); do
-        internal="$(diskutil info "$d" 2>/dev/null | awk -F: '/Internal/{gsub(/ /,"",$2);print $2; exit}')"
-        [[ "$internal" == "No" ]] || continue
-        diskutil list "$d" 2>/dev/null | grep -q VTOYEFI && { echo "$d"; return 0; }
+        [[ "$(diskutil info "$d" 2>/dev/null | awk -F: '/Internal/{gsub(/ /,"",$2);print $2;exit}')" == "No" ]] || continue
+        nm="$(diskutil info "$d" | awk -F: '/Device \/ Media Name/{sub(/^ */,"",$2);print $2;exit}')"
+        sz="$(diskutil info "$d" | awk -F: '/Disk Size/{sub(/^ */,"",$2);print $2;exit}' | awk '{print $1" "$2}')"
+        if diskutil list "$d" | grep -q VTOYEFI; then vt=" [Ventoy]"; else vt=""; fi
+        printf '%s|%s - %s %s%s\n' "$d" "${d#/dev/}" "${nm:-USB}" "$sz" "$vt"
     done
-    return 1
+}
+
+pick_disk() {
+    local lines=() ids=() labels=() line
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        ids+=("${line%%|*}"); labels+=("${line#*|}"); lines+=("$line")
+    done < <(_ext_disks)
+    [[ ${#ids[@]} -gt 0 ]] || die "No external USB disks found. Plug in your Ventoy USB and retry."
+
+    if (( GUI )); then
+        local applelist chosen i
+        applelist=""
+        for i in "${!labels[@]}"; do
+            applelist+="\"$(_esc "${labels[$i]}")\""
+            (( i < ${#labels[@]}-1 )) && applelist+=", "
+        done
+        chosen="$(osascript -e "set r to choose from list {$applelist} with title \"$TITLE\" with prompt \"Select the target Ventoy USB:\" without multiple selections allowed" 2>/dev/null)"
+        [[ -z "$chosen" || "$chosen" == "false" ]] && die "No USB selected."
+        for i in "${!labels[@]}"; do [[ "${labels[$i]}" == "$chosen" ]] && { DISK="${ids[$i]}"; break; }; done
+    else
+        local i
+        say "External disks:"
+        for i in "${!labels[@]}"; do echo "  [$i] ${labels[$i]}"; done
+        read -r -p "Select disk number: " i
+        DISK="${ids[$i]:-}"
+    fi
+    [[ -n "${DISK:-}" && -e "$DISK" ]] || die "Invalid disk selection."
 }
 
 # ================================ START =====================================
 clear
 say "=========================================================="
-say " Ventoy SteamOS Imager for macOS   v${APP_VERSION}"
+say " $TITLE   v${APP_VERSION}"
 say "=========================================================="
+check_ventoy_latest
+
+if (( GUI )); then
+    ui_confirm "This adds the SteamOS repair image to a Ventoy USB.\n\nYou'll pick the .img and the USB next.\n\nWARNING: the USB's data partition will be ERASED - back up any ISOs first." \
+        || { say "Cancelled."; exit 0; }
+fi
 
 ensure_sgdisk
-check_ventoy_latest
-find_repair_image
 
-# ---- locate + confirm the USB ----
-say "Looking for a MActoy / Ventoy USB (partition labelled VTOYEFI)..."
-if ! DISK="$(detect_usb)"; then
-    say "No Ventoy USB auto-detected. External disks:"
-    diskutil list external physical
-    read -r -p "Enter the target disk (e.g. /dev/disk6): " DISK
-fi
-[[ -b "$DISK" || -e "$DISK" ]] || die "Disk not found: $DISK"
+# admin rights (password prompt appears in Terminal), kept alive during long dd
+say "Administrator access is required for disk operations."
+sudo -v || die "Could not obtain administrator rights."
+( while true; do sudo -n -v 2>/dev/null; sleep 30; done ) & KEEPALIVE=$!
 
-# safety: must be external + physical, must look like Ventoy
-INTERNAL="$(diskutil info "$DISK" | awk -F: '/Internal/{gsub(/ /,"",$2);print $2; exit}')"
-[[ "$INTERNAL" == "No" ]] || die "$DISK is an INTERNAL disk. Refusing. (SteamOS install targets USB only.)"
-diskutil list "$DISK" | grep -q VTOYEFI || die "$DISK has no VTOYEFI partition - not a Ventoy USB."
+pick_image
+pick_disk
 
-say "Target USB:"
-diskutil list "$DISK"
+# safety
+[[ "$(diskutil info "$DISK" | awk -F: '/Internal/{gsub(/ /,"",$2);print $2;exit}')" == "No" ]] \
+    || die "$DISK is INTERNAL. Refusing."
+diskutil list "$DISK" | grep -q VTOYEFI || {
+    ui_confirm "$DISK has no VTOYEFI partition - it may not be a Ventoy USB.\nContinue anyway?" || die "Not a Ventoy USB."
+}
 
 RAW="${DISK/disk/rdisk}"
 
-# ---- read USB geometry ----
-SECTOR="$(diskutil info "$DISK" | awk -F: '/Device Block Size/{print $2}' | grep -oE '[0-9]+' | head -1)"
-SECTOR="${SECTOR:-512}"
-P1_START="$(p_first "$DISK" 1)"
-P1_TYPE="$(p_type  "$DISK" 1)"
-P1_UUID="$(p_uuid  "$DISK" 1)"
+# USB geometry
+SECTOR="$(diskutil info "$DISK" | awk -F: '/Device Block Size/{print $2}' | grep -oE '[0-9]+' | head -1)"; SECTOR="${SECTOR:-512}"
+P1_START="$(p_first "$DISK" 1)"; P1_TYPE="$(p_type "$DISK" 1)"; P1_UUID="$(p_uuid "$DISK" 1)"
 P2_START="$(p_first "$DISK" 2)"
 [[ -n "$P1_START" && -n "$P2_START" ]] || die "Could not read Ventoy partition geometry."
 
-# ---- read source image geometry (attach read-only) ----
-say "Reading SteamOS repair image layout..."
-ATTACH_OUT="$(hdiutil attach -nomount -readonly "$IMG")"
+# source image geometry
+say "Reading SteamOS repair image..."
+ATTACH_OUT="$(hdiutil attach -nomount -readonly "$IMG")" || die "Failed to attach image."
 SRC="$(echo "$ATTACH_OUT" | awk '/GUID_partition_scheme/{print $1; exit}')"
-[[ -n "$SRC" ]] || { echo "$ATTACH_OUT"; die "Failed to attach repair image."; }
+[[ -n "$SRC" ]] || { echo "$ATTACH_OUT"; die "Failed to attach image."; }
 SRCRAW="${SRC/disk/rdisk}"
-cleanup_src() { hdiutil detach "$SRC" >/dev/null 2>&1 || true; }
-trap cleanup_src EXIT
+cleanup() { [[ -n "${SRC:-}" ]] && hdiutil detach "$SRC" >/dev/null 2>&1; kill "${KEEPALIVE:-}" 2>/dev/null; }
+trap cleanup EXIT
 
-declare -a S_TYPE S_UUID S_SIZE S_NAME
-TOTAL_SRC=0
+declare -a S_TYPE S_UUID S_SIZE S_NAME; TOTAL_SRC=0
 for s in 1 2 3 4 5; do
-    S_TYPE[$s]="$(p_type "$SRC" $s)"
-    S_UUID[$s]="$(p_uuid "$SRC" $s)"
-    S_SIZE[$s]="$(p_size "$SRC" $s)"
-    S_NAME[$s]="$(p_name "$SRC" $s)"
-    [[ -n "${S_SIZE[$s]}" ]] || die "Could not read source partition $s"
+    S_TYPE[$s]="$(p_type "$SRC" $s)"; S_UUID[$s]="$(p_uuid "$SRC" $s)"
+    S_SIZE[$s]="$(p_size "$SRC" $s)"; S_NAME[$s]="$(p_name "$SRC" $s)"
+    [[ -n "${S_SIZE[$s]}" ]] || die "Could not read source partition $s (is this a SteamOS repair image?)"
     TOTAL_SRC=$(( TOTAL_SRC + S_SIZE[$s] ))
 done
 
-# ---- compute new layout ----
+# layout math
 RESERVE_SECTORS=$(( RESERVE_GIB * 1024 * 1024 * 1024 / SECTOR ))
-NEEDED=$(( TOTAL_SRC + 5 * 2048 + 2048 ))          # source data + alignment slack
-if (( RESERVE_SECTORS < NEEDED )); then
-    RESERVE_SECTORS=$(( ( NEEDED / 2048 + 2 ) * 2048 ))
-    warn "Reserve bumped up to fit the image (~$(( RESERVE_SECTORS * SECTOR / 1024/1024/1024 )) GiB)."
-fi
+NEEDED=$(( TOTAL_SRC + 5 * 2048 + 2048 ))
+(( RESERVE_SECTORS < NEEDED )) && RESERVE_SECTORS=$(( ( NEEDED / 2048 + 2 ) * 2048 ))
 NEW_P1_END=$(( P2_START - RESERVE_SECTORS - 1 ))
-NEW_P1_END=$(( ( (NEW_P1_END + 1) / 2048 ) * 2048 - 1 ))   # align
+NEW_P1_END=$(( ( (NEW_P1_END + 1) / 2048 ) * 2048 - 1 ))
 GAP=$(( P2_START - NEW_P1_END - 1 ))
 (( NEW_P1_END > P1_START + 2048 )) || die "Disk too small to carve out SteamOS space."
-(( GAP >= NEEDED )) || die "Not enough room before VTOYEFI (need $NEEDED sectors, have $GAP)."
-
+(( GAP >= NEEDED )) || die "Not enough room before VTOYEFI."
 NEW_P1_GIB=$(( (NEW_P1_END - P1_START) * SECTOR / 1024/1024/1024 ))
+RES_GIB=$(( RESERVE_SECTORS * SECTOR /1024/1024/1024 ))
 
-# ------------------------------ the plan ------------------------------------
-say "=========================== PLAN ==========================="
-ok "USB              : $DISK  (sector ${SECTOR}B)"
-ok "Repair image     : $IMG"
-ok "Data partition   : recreate exFAT, keep start @ $P1_START, ~${NEW_P1_GIB} GiB"
-ok "SteamOS space    : ~$(( RESERVE_SECTORS * SECTOR /1024/1024/1024 )) GiB in gap before VTOYEFI"
-ok "New partitions   : p3 esp, p4 efi-A, p5 rootfs-A, p6 var-A, p7 home (orig PARTUUIDs preserved)"
-ok "VTOYEFI (p2)     : untouched"
-say "============================================================"
-warn "This WIPES the Ventoy data partition ($DISK). Back up any ISOs FIRST."
-echo
-read -r -p "Type WIPE to proceed, anything else to abort: " CONFIRM
-[[ "$CONFIRM" == "WIPE" ]] || die "Aborted by user."
+PLAN="Target USB : $DISK
+Repair image : $(basename "$IMG")
+
+Data partition : recreate exFAT, ~${NEW_P1_GIB} GiB
+SteamOS space  : ~${RES_GIB} GiB before VTOYEFI
+New partitions : esp, efi-A, rootfs-A, var-A, home (original PARTUUIDs kept)
+VTOYEFI        : untouched"
+
+say "===================== PLAN ====================="; printf '%s\n' "$PLAN"; say "================================================"
+ui_confirm "$PLAN" || die "Aborted."
+ui_danger "FINAL WARNING
+
+The data partition on $DISK will be ERASED and recreated.
+Any ISOs on it will be lost.
+
+Proceed?" || die "Aborted."
 
 # ------------------------------ execute -------------------------------------
-say "Unmounting $DISK..."
-diskutil unmountDisk force "$DISK" >/dev/null || die "Could not unmount $DISK"
+say "Unmounting $DISK..."; sudo diskutil unmountDisk force "$DISK" >/dev/null || die "Could not unmount $DISK"
 
-say "Shrinking + recreating Ventoy data partition (p1)..."
-sgdisk -d 1 "$DISK" >/dev/null
-sgdisk -n 1:${P1_START}:${NEW_P1_END} -t 1:${P1_TYPE:-0700} -u 1:${P1_UUID} -c 1:"Ventoy" "$DISK" >/dev/null
-ok "p1 recreated."
+say "Shrinking + recreating Ventoy data partition..."
+sudo sgdisk -d 1 "$DISK" >/dev/null
+sudo sgdisk -n 1:${P1_START}:${NEW_P1_END} -t 1:${P1_TYPE:-0700} -u 1:${P1_UUID} -c 1:"Ventoy" "$DISK" >/dev/null
 
-say "Creating SteamOS partitions (cloning type + PARTUUID from image)..."
+say "Creating SteamOS partitions (cloning type + PARTUUID)..."
 tgt=3
 for s in 1 2 3 4 5; do
-    sgdisk -n ${tgt}:0:+${S_SIZE[$s]}s \
-           -t ${tgt}:${S_TYPE[$s]} \
-           -u ${tgt}:${S_UUID[$s]} \
-           -c ${tgt}:"${S_NAME[$s]}" "$DISK" >/dev/null
-    ok "p${tgt}  ${S_NAME[$s]}  uuid ${S_UUID[$s]}"
+    sudo sgdisk -n ${tgt}:0:+${S_SIZE[$s]}s -t ${tgt}:${S_TYPE[$s]} -u ${tgt}:${S_UUID[$s]} -c ${tgt}:"${S_NAME[$s]}" "$DISK" >/dev/null
+    ok "p${tgt}  ${S_NAME[$s]}  ${S_UUID[$s]}"
     tgt=$(( tgt + 1 ))
 done
 
 sync
 say "Re-reading partition table..."
-diskutil unmountDisk force "$DISK" >/dev/null 2>&1 || true
-for i in $(seq 1 15); do
-    [[ -e "${DISK}s7" ]] && break
-    sleep 1
-done
-[[ -e "${DISK}s7" ]] || die "New partitions did not appear. Unplug/replug the USB and re-run (it will resume cleanly)."
+sudo diskutil unmountDisk force "$DISK" >/dev/null 2>&1 || true
+for i in $(seq 1 15); do [[ -e "${DISK}s7" ]] && break; sleep 1; done
+[[ -e "${DISK}s7" ]] || die "New partitions did not appear. Unplug/replug the USB and re-run."
 
-say "Formatting new Ventoy data partition as exFAT..."
-newfs_exfat -v Ventoy "${RAW}s1" >/dev/null 2>&1 || diskutil eraseVolume ExFAT Ventoy "${DISK}s1" >/dev/null
+say "Formatting data partition as exFAT..."
+sudo newfs_exfat -v Ventoy "${RAW}s1" >/dev/null 2>&1 || sudo diskutil eraseVolume ExFAT Ventoy "${DISK}s1" >/dev/null
 
-say "Writing SteamOS partition images (this takes a few minutes; press Ctrl-T for dd progress)..."
+say "Writing SteamOS images (minutes; press Ctrl-T for dd progress)..."
 tgt=3
 for s in 1 2 3 4 5; do
-    ok "p${tgt}  <-  source partition ${s}  (${S_NAME[$s]})"
-    dd if="${SRCRAW}s${s}" of="${RAW}s${tgt}" bs=4m 2>/dev/null
+    ok "p${tgt} <- source ${s} (${S_NAME[$s]})"
+    sudo dd if="${SRCRAW}s${s}" of="${RAW}s${tgt}" bs=4m 2>/dev/null
     tgt=$(( tgt + 1 ))
 done
 sync
-cleanup_src; trap - EXIT
+hdiutil detach "$SRC" >/dev/null 2>&1; SRC=""
 
 say "Installing Ventoy menu entry, config and theme..."
 diskutil mount "${DISK}s1" >/dev/null || die "Could not mount data partition"
@@ -251,14 +280,13 @@ cp "$ASSETS/ventoy_grub.cfg" "$MP/ventoy/ventoy_grub.cfg"
 cp "$ASSETS/ventoy.json"     "$MP/ventoy/ventoy.json"
 cp -R "$ASSETS/themes/A-Team" "$MP/ventoy/themes/A-Team"
 sync
-diskutil unmount "${DISK}s1" >/dev/null || true
-ok "Done."
+diskutil unmount "${DISK}s1" >/dev/null 2>&1 || true
 
 say "=========================================================="
 say " SUCCESS - SteamOS added to your Ventoy USB"
 say "=========================================================="
-ok "Boot the USB (Ventoy), press F6, choose 'SteamOS Repair / Install'."
-ok "You can safely eject now:  diskutil eject $DISK"
+ui_info "Done!\n\nBoot the USB, press F6, and choose 'SteamOS Repair / Install'.\n\nYou can eject $DISK now."
+ok "Eject:  diskutil eject $DISK"
 echo
-read -r -p "Press ENTER to exit "
+read -r -p "Press ENTER to exit " _ 2>/dev/null || true
 exit 0

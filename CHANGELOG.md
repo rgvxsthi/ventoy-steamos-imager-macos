@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.0
+- Interactive macOS UI: double-clickable `.command`, native dialogs (osascript)
+  for choosing the repair image and USB and for confirmations; disk progress
+  shown in Terminal. Terminal-menu fallback when run headless.
+
 ## v1.0.0
 - Initial macOS fork of the Linux Ventoy SteamOS Repair Add-on.
 - Runs entirely on macOS (diskutil / hdiutil / sgdisk / newfs_exfat).

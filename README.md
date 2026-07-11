@@ -46,11 +46,13 @@ code (in `VTOYEFI` + reserved sectors) is never touched, so Ventoy keeps working
 
 ## Usage
 
+**Easiest:** double-click **`Ventoy SteamOS Imager.command`** in Finder. It opens Terminal, then walks you through native macOS dialogs: pick the repair `.img`, pick the USB, review the plan, confirm the erase. Your Mac password is entered once in the Terminal window (needed for disk access).
+
+Or from a terminal:
+
 ```bash
-# put the repair image next to the script, e.g.
-#   steamdeck-...-repair-....img
 cd ventoy-steamos-imager-macos
-sudo ./ventoy-steamos-imager.sh
+./ventoy-steamos-imager.sh
 ```
 
 Then: pick the USB → review the plan → type `WIPE` to confirm. When it finishes,
